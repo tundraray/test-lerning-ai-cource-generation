@@ -87,7 +87,7 @@ Run the application with a video file path as an argument:
 npm start /path/to/your/video.mp4
 
 # Process video with audio only (no image analysis)
-npm start /path/to/your/video.mp4 --no-images
+npm start /path/to/your/video.mp4 no-images
 ```
 
 ### Development Mode
@@ -101,14 +101,14 @@ npm run dev /path/to/your/video.mp4
 npm run dev:debug /path/to/your/video.mp4
 ```
 
-You can also use the --no-images flag in development mode:
+You can also use the no-images flag in development mode:
 ```bash
-npm run dev /path/to/your/video.mp4 --no-images
+npm run dev /path/to/your/video.mp4 no-images
 ```
 
 The application will create an `output` directory containing:
 - Extracted audio file
-- Frame images (if not using --no-images)
+- Frame images (if not using no-images)
 - Analysis results from each AI model in separate files:
   - With images: 
     - `<video_name>_openai_with_images.json`
