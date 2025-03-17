@@ -1,408 +1,37 @@
-import ffmpeg from 'fluent-ffmpeg';
 import * as fs from 'fs';
 import * as path from 'path';
-import OpenAI from 'openai';
-import sharp from 'sharp';
 import dotenv from 'dotenv';
-import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import { AIService } from './aiService';
+import { VideoProcessor, ProcessOptions } from './videoProcessor';
+import { checkFFmpeg, SUPPORTED_VIDEO_FORMATS, MAX_VIDEO_SIZE_MB } from './utils';
+import { TranscriptionService, TranscriptionServiceType } from './transcriptionService';
 
 dotenv.config();
 
-interface ProcessOptions {
+interface ProcessingOptions {
     videoPath: string;
     includeImages: boolean;
 }
 
-// Check if FFmpeg is installed and accessible
-async function checkFFmpeg(): Promise<boolean> {
-    try {
-        await execAsync('ffmpeg -version');
-        return true;
-    } catch (error) {
-        console.error('\x1b[31m%s\x1b[0m', 'FFmpeg is not installed or not accessible in PATH!');
-        console.log('\nTo install FFmpeg:');
-        console.log('\nWindows (PowerShell as Administrator):');
-        console.log('powershell -ExecutionPolicy Bypass -File install-ffmpeg-windows.ps1');
-        console.log('\nLinux:');
-        console.log('sudo bash install-ffmpeg-linux.sh');
-        console.log('\nOr install manually from:');
-        console.log('Windows: https://ffmpeg.org/download.html');
-        console.log('Mac: brew install ffmpeg');
-        console.log('Linux: sudo apt-get install ffmpeg');
-        return false;
-    }
-}
-
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
-
-const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY || ''
-});
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-
-interface Timestamp {
-    start: number;
-    end: number;
-    text: string;
-}
-
-async function retry<T>(
-    operation: () => Promise<T>,
-    maxRetries: number = 3,
-    delayMs: number = 1000
-): Promise<T> {
-    let lastError: Error;
+function parseCommandLineArgs(): ProcessingOptions {
+    const args = process.argv.slice(2);
+    const videoPath = args[0];
     
-    for (let i = 0; i < maxRetries; i++) {
-        try {
-            return await operation();
-        } catch (error: any) {
-            lastError = error;
-            if (i < maxRetries - 1) {
-                console.log(`Retry ${i + 1}/${maxRetries} - Waiting ${delayMs}ms before next attempt...`);
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-            }
+    // Parse options from command line
+    const options: { [key: string]: string } = {};
+    args.slice(1).forEach(arg => {
+        if (arg.startsWith('--')) {
+            const [key, value] = arg.substring(2).split('=');
+            options[key] = value || 'true';
+        } else if (arg === 'no-images') {
+            options.images = 'false';
         }
-    }
+    });
     
-    throw lastError!;
-}
-
-// Add after imports
-const LESSON_SYSTEM_PROMPT = `You need to create a lesson from the content that the user sends you.
-The lesson must be generated in the SAME LANGUAGE as the transcription content (do not translate, use the original language).
-The lesson should contain the following:
-1) 2-7 memory cards (each description must be between 40 to 150 characters)
-2) 1-3 quiz cards with varied questions
-3) 1 Open-Ended Question Card
-4) The lesson must have a title and description, which you must fill out in lessonInfo section and must reflect the overall essence of our lesson
-
-Your answer must be structured exactly in JSON format. Do not include any additional text or formatting.`;
-
-const openai_model = "gpt-4o-2024-11-20";
-const anthropic_model = "claude-3-5-sonnet-20240620";
-const gemini_model = "gemini-2.0-flash";
-
-class VideoProcessor {
-    private videoPath: string;
-    private outputDir: string;
-    private videoName: string;
-    private videoOutputDir: string;
-    private includeImages: boolean;
-
-    constructor(options: ProcessOptions) {
-        this.videoPath = options.videoPath;
-        this.includeImages = options.includeImages;
-        this.videoName = path.basename(options.videoPath, path.extname(options.videoPath));
-        this.outputDir = path.join(process.cwd(), 'output');
-        this.videoOutputDir = path.join(this.outputDir, this.videoName);
-
-        // Create or recreate output directories
-        console.log('Setting up output directories...');
-        
-        // Create main output directory if it doesn't exist
-        if (!fs.existsSync(this.outputDir)) {
-            console.log(`Creating main output directory: ${this.outputDir}`);
-            fs.mkdirSync(this.outputDir);
-        }
-
-        // Remove existing video output directory if it exists with retries
-        // this.removeExistingOutputDirectory(this.videoOutputDir);
-
-        // Create video output directory if it doesn't exist
-        if (!fs.existsSync(this.videoOutputDir)) {
-            console.log(`Creating video output directory: ${this.videoOutputDir}`);
-            try {
-                fs.mkdirSync(this.videoOutputDir);
-            } catch (error: any) {
-                throw new Error(`Failed to create output directory: ${error.message}`);
-            }
-        }
-    }
-
-    private removeExistingOutputDirectory(dir: string) {
-        if (fs.existsSync(dir)) {
-            console.log(`Removing existing output directory: ${dir}`);
-            const maxRetries = 3;
-            const retryDelay = 1000; // 1 second
-
-            for (let i = 0; i < maxRetries; i++) {
-                try {
-                    fs.rmSync(dir, { recursive: true, force: true });
-                    break; // If successful, exit the loop
-                } catch (error) {
-                    if (i === maxRetries - 1) {
-                        // On last retry, try to handle gracefully
-                        console.warn(`Warning: Could not remove directory ${dir} after ${maxRetries} attempts.`);
-                        console.warn('Will attempt to continue with existing directory...');
-                        
-                        // Try to clean up contents instead of removing directory
-                        try {
-                                const files = fs.readdirSync(dir);
-                            for (const file of files) {
-                                const filePath = path.join(dir, file);
-                                try {
-                                    if (fs.lstatSync(filePath).isDirectory()) {
-                                        fs.rmSync(filePath, { recursive: true, force: true });
-                                    } else {
-                                        fs.unlinkSync(filePath);
-                                    }
-                                } catch (e) {
-                                    console.warn(`Could not remove ${filePath}`);
-                                }
-                            }
-                        } catch (e) {
-                            console.warn('Could not clean directory contents');
-                        }
-                    } else {
-                        console.log(`Retry ${i + 1}/${maxRetries} - Waiting ${retryDelay}ms before next attempt...`);
-                        // Sleep for retryDelay milliseconds
-                        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelay);
-                    }
-                }
-            }
-        }
-    }
-
-    private extractAudio(): Promise<string> {
-        const audioPath = path.join(this.videoOutputDir, 'audio.mp3');
-        return new Promise((resolve, reject) => {
-            ffmpeg(this.videoPath)
-                .toFormat('mp3')
-                .on('end', () => resolve(audioPath))
-                .on('error', (err: Error) => reject(err))
-                .save(audioPath);
-        });
-    }
-
-    private extractFrames(): Promise<string[]> {
-        if (!this.includeImages) {
-            return Promise.resolve([]);
-        }
-
-        const framesDir = path.join(this.videoOutputDir, 'frames');
-        if (!fs.existsSync(framesDir)) {
-            fs.mkdirSync(framesDir);
-        }
-
-        return new Promise((resolve, reject) => {
-            const frames: string[] = [];
-            
-            // First, get video metadata
-            ffmpeg.ffprobe(this.videoPath, (err, metadata) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-
-                const duration = metadata.format.duration || 0;
-                const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-                
-                if (!videoStream) {
-                    reject(new Error('No video stream found'));
-                    return;
-                }
-
-                // Get video dimensions
-                const width = videoStream.width || 1280;
-                const height = videoStream.height || 720;
-
-                // Calculate dimensions maintaining aspect ratio with max width/height of 1280
-                let targetWidth = width;
-                let targetHeight = height;
-                const maxDimension = 1280;
-
-                if (width > height && width > maxDimension) {
-                    targetWidth = maxDimension;
-                    targetHeight = Math.round((height * maxDimension) / width);
-                } else if (height > maxDimension) {
-                    targetHeight = maxDimension;
-                    targetWidth = Math.round((width * maxDimension) / height);
-                }
-
-                console.log(`Video dimensions: ${width}x${height}`);
-                console.log(`Frame dimensions: ${targetWidth}x${targetHeight}`);
-
-                ffmpeg(this.videoPath)
-                    .on('end', () => resolve(frames))
-                    .on('error', (err: Error) => reject(err))
-                    .on('filenames', (filenames: string[]) => {
-                        frames.push(...filenames.map(filename => path.join(framesDir, filename)));
-                    })
-                    .screenshots({
-                        count: Math.ceil(duration),
-                        timemarks: Array.from({ length: Math.ceil(duration) }, (_, i) => i), // [0, 1, 2, ...]
-                        folder: framesDir,
-                        filename: 'frame-%i.jpg',
-                        size: `${targetWidth}x${targetHeight}`
-                    });
-            });
-        });
-    }
-
-    private async transcribeAudio(audioPath: string): Promise<Timestamp[]> {
-        const transcription = await openai.audio.transcriptions.create({
-            file: fs.createReadStream(audioPath),
-            prompt: "Please translate all 'text', 'title', and 'description' elements of this json to %s language and return exactly the same json in response but with translated 'text', 'title', and 'description' elements. Do not translate the values inside the object \"statusInfo\": {}. Make sure that the response is **only** the JSON structure above and does not include any additional formatting like '```json' or other textual explanations.",
-            model: "whisper-1",
-            response_format: "verbose_json"
-        });
-
-        return (transcription.segments || []).map(segment => ({
-            start: segment.start,
-            end: segment.end,
-            text: segment.text
-        }));
-    }
-
-    private async imageToBase64(imagePath: string): Promise<string> {
-        const imageBuffer = await fs.promises.readFile(imagePath);
-        return imageBuffer.toString('base64');
-    }
-
-    private async analyzeWithOpenAI(timestamps: Timestamp[], frames: string[]): Promise<string> {
-        return retry(async () => {
-            const messages = [
-                { role: "system", content: LESSON_SYSTEM_PROMPT },
-                { 
-                    role: "user", 
-                    content: this.includeImages ? [
-                        {
-                            type: "text",
-                            text: `Create a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`
-                        },
-                        ...await Promise.all(frames.map(async (frame) => ({
-                            type: "image_url",
-                            image_url: {
-                                url: `data:image/jpeg;base64,${await this.imageToBase64(frame)}`
-                            }
-                        })))
-                    ] : `Create a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`
-                }
-            ];
-
-            const completion = await openai.chat.completions.create({
-                model: openai_model,
-                messages: messages as any,
-                max_tokens: 1000,
-                response_format: { type: "json_object" }
-            });
-
-            return completion.choices[0].message.content || '';
-        });
-    }
-
-    private async analyzeWithAnthropic(timestamps: Timestamp[], frames: string[]): Promise<string> {
-        return retry(async () => {
-            const imageContents = this.includeImages ? await Promise.all(frames.map(async (frame) => ({
-                type: "image" as const,
-                source: {
-                    type: "base64" as const,
-                    media_type: "image/jpeg" as const,
-                    data: await this.imageToBase64(frame)
-                }
-            }))) : [];
-
-            const message = await anthropic.messages.create({
-                model: anthropic_model,
-                max_tokens: 1000,
-                messages: [{
-                    role: "user",
-                    content: this.includeImages ? [
-                        {
-                            type: "text" as const,
-                            text: `${LESSON_SYSTEM_PROMPT}\n\nCreate a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`
-                        },
-                        ...imageContents
-                    ] : `${LESSON_SYSTEM_PROMPT}\n\nCreate a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`
-                }]
-            });
-
-            const content = message.content[0];
-            if (content.type === 'text') {
-                return content.text;
-            }
-            return 'No text content received from Claude';
-        });
-    }
-
-    private async analyzeWithGemini(timestamps: Timestamp[], frames: string[]): Promise<string> {
-        return retry(async () => {
-            const model = genAI.getGenerativeModel({ model: gemini_model });
-            
-            const imageContents = this.includeImages ? await Promise.all(frames.map(async frame => ({
-                inlineData: {
-                    data: (await fs.promises.readFile(frame)).toString('base64'),
-                    mimeType: 'image/jpeg'
-                }
-            }))) : [];
-
-            const content = this.includeImages ? [
-                `${LESSON_SYSTEM_PROMPT}\n\nCreate a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`,
-                ...imageContents
-            ] : [
-                `${LESSON_SYSTEM_PROMPT}\n\nCreate a lesson based on this video content:\nTranscription: ${JSON.stringify(timestamps)}`
-            ];
-
-            const result = await model.generateContent(content);
-            return result.response.text();
-        });
-    }
-
-    private async saveTranscription(timestamps: Timestamp[]): Promise<void> {
-        const transcriptionPath = path.join(this.videoOutputDir, 'transcription.json');
-        await fs.promises.writeFile(transcriptionPath, JSON.stringify(timestamps, null, 2), 'utf-8');
-        console.log(`Transcription saved to ${transcriptionPath}`);
-    }
-
-    private async saveAnalysis(content: string, aiName: string): Promise<void> {
-        const filename = path.join(this.videoOutputDir, `analysis_${aiName}${this.includeImages ? '_with_images' : ''}.json`);
-        await fs.promises.writeFile(filename, content, 'utf-8');
-        console.log(`Analysis saved to ${filename}`);
-    }
-
-    public async process(): Promise<void> {
-        try {
-            console.log(`Processing video: ${this.videoName}`);
-            console.log(`Output directory: ${this.videoOutputDir}`);
-
-            console.log('Extracting audio...');
-            const audioPath = await this.extractAudio();
-
-            console.log('Extracting frames...');
-            const frames = await this.extractFrames();
-
-            console.log('Transcribing audio...');
-            const timestamps = await this.transcribeAudio(audioPath);
-            await this.saveTranscription(timestamps);
-
-            console.log('Analyzing with OpenAI...');
-            const openaiAnalysis = await this.analyzeWithOpenAI(timestamps, frames);
-            await this.saveAnalysis(openaiAnalysis, 'openai');
-
-            console.log('Analyzing with Anthropic Claude...');
-            const anthropicAnalysis = await this.analyzeWithAnthropic(timestamps, frames);
-            await this.saveAnalysis(anthropicAnalysis, 'anthropic');
-
-            console.log('Analyzing with Google Gemini...');
-            const geminiAnalysis = await this.analyzeWithGemini(timestamps, frames);
-            await this.saveAnalysis(geminiAnalysis, 'gemini');
-
-            console.log('Processing completed successfully!');
-            console.log(`All files are saved in: ${this.videoOutputDir}`);
-        } catch (error) {
-            console.error('Error during processing:', error);
-            throw error;
-        }
-    }
+    return {
+        videoPath,
+        includeImages: options.images !== 'false'
+    };
 }
 
 async function main() {
@@ -413,16 +42,22 @@ async function main() {
     }
 
     // Parse command line arguments
-    const args = process.argv.slice(2);
-    const videoPath = args[0];
-    const includeImages = args[1] !== 'no-images';
+    const options = parseCommandLineArgs();
+    const { videoPath, includeImages } = options;
+
+    // Всегда используем все доступные сервисы транскрипции
+    const transcriptionServices = [
+        TranscriptionServiceType.OPENAI_WHISPER,
+        TranscriptionServiceType.AMAZON_TRANSCRIBE
+    ];
 
     // Log processing mode
     console.log(`Processing mode: ${includeImages ? 'With image analysis' : 'Audio only (no image analysis)'}`);
+    console.log(`Using ALL transcription services: ${transcriptionServices.join(', ')}`);
 
     if (!videoPath) {
         console.error('\x1b[31m%s\x1b[0m', 'Please provide a video path as an argument');
-        console.log('Usage: npm start <video_path> [--no-images]');
+        console.log('Usage: npm start <video_path> [no-images]');
         process.exit(1);
     }
 
@@ -433,11 +68,10 @@ async function main() {
     }
 
     // Validate video format
-    const supportedFormats = ['.mp4', '.avi', '.mov', '.mkv', '.webm'];
     const fileExtension = path.extname(videoPath).toLowerCase();
-    if (!supportedFormats.includes(fileExtension)) {
+    if (!SUPPORTED_VIDEO_FORMATS.includes(fileExtension)) {
         console.error('\x1b[31m%s\x1b[0m', `Error: Unsupported video format: ${fileExtension}`);
-        console.log('Supported formats:', supportedFormats.join(', '));
+        console.log('Supported formats:', SUPPORTED_VIDEO_FORMATS.join(', '));
         process.exit(1);
     }
 
@@ -445,10 +79,9 @@ async function main() {
     try {
         const stats = await fs.promises.stat(videoPath);
         const fileSizeInMB = stats.size / (1024 * 1024);
-        const maxSizeInMB = 500; // 500MB limit
         
-        if (fileSizeInMB > maxSizeInMB) {
-            console.error('\x1b[31m%s\x1b[0m', `Error: Video file is too large (${Math.round(fileSizeInMB)}MB). Maximum size is ${maxSizeInMB}MB`);
+        if (fileSizeInMB > MAX_VIDEO_SIZE_MB) {
+            console.error('\x1b[31m%s\x1b[0m', `Error: Video file is too large (${Math.round(fileSizeInMB)}MB). Maximum size is ${MAX_VIDEO_SIZE_MB}MB`);
             process.exit(1);
         }
     } catch (error: any) {
@@ -456,15 +89,22 @@ async function main() {
         process.exit(1);
     }
 
-    // Check if API keys are set
-    const requiredEnvVars = {
+    // Check if required API keys are set
+    let requiredEnvVars: { [key: string]: string | undefined } = {
         'OPENAI_API_KEY': process.env.OPENAI_API_KEY,
         'ANTHROPIC_API_KEY': process.env.ANTHROPIC_API_KEY,
-        'GOOGLE_API_KEY': process.env.GOOGLE_API_KEY
+        'GOOGLE_API_KEY': process.env.GOOGLE_API_KEY,
+        // Всегда требуем AWS, так как используем Amazon Transcribe
+        'AWS_ACCESS_KEY_ID': process.env.AWS_ACCESS_KEY_ID,
+        'AWS_SECRET_ACCESS_KEY': process.env.AWS_SECRET_ACCESS_KEY,
     };
 
     const missingEnvVars = Object.entries(requiredEnvVars)
-        .filter(([_, value]) => !value)
+        .filter(([key, value]) => {
+            // AWS_REGION is optional with default
+            if (key === 'AWS_REGION') return false;
+            return !value;
+        })
         .map(([key]) => key);
 
     if (missingEnvVars.length > 0) {
@@ -474,12 +114,22 @@ async function main() {
         console.log('OPENAI_API_KEY=your_openai_key_here');
         console.log('ANTHROPIC_API_KEY=your_anthropic_key_here');
         console.log('GOOGLE_API_KEY=your_google_key_here');
+        console.log('AWS_ACCESS_KEY_ID=your_aws_access_key_here');
+        console.log('AWS_SECRET_ACCESS_KEY=your_aws_secret_key_here');
+        console.log('AWS_REGION=us-east-1 (optional)');
+        console.log('AWS_S3_BUCKET=your_bucket_name (optional)');
+        
         process.exit(1);
     }
 
     try {
-        const processor = new VideoProcessor({ videoPath, includeImages });
-        await processor.process();
+        // Initialize services
+        const processorOptions: ProcessOptions = { videoPath, includeImages };
+        const videoProcessor = new VideoProcessor(processorOptions);
+        const aiService = new AIService();
+        
+        // Process the video with all transcription services
+        await processMatrix(videoProcessor, aiService, transcriptionServices);
     } catch (error) {
         console.error('\x1b[31m%s\x1b[0m', 'Error during processing:');
         if (error instanceof Error) {
@@ -495,4 +145,130 @@ async function main() {
     }
 }
 
+// Новая функция для генерации матрицы результатов
+async function processMatrix(
+    videoProcessor: VideoProcessor, 
+    aiService: AIService,
+    transcriptionServices: TranscriptionServiceType[]
+) {
+    console.log('Processing video...');
+    console.log(`Output directory: ${videoProcessor.getOutputDirectory()}`);
+
+    // Получаем путь к видео из videoProcessor
+    const videoPath = videoProcessor.getVideoPath(); // Используем геттер
+
+    // Step 1: Extract audio
+    console.log('Extracting audio...');
+    const audioPath = await videoProcessor.extractAudio();
+
+    // Step 2: Extract frames if needed
+    console.log('Extracting frames...');
+    const frames = await videoProcessor.extractFrames();
+    
+    // Prepare to store all transcriptions
+    const transcriptions: { [service: string]: any } = {};
+    
+    // Step 3: Create transcriptions with each service
+    for (const service of transcriptionServices) {
+        console.log(`\n===== Transcribing with ${service} =====`);
+        try {
+            const timestamps = await TranscriptionService.transcribe(audioPath, service);
+            transcriptions[service] = timestamps;
+            
+            // Save individual transcription
+            const serviceName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : 'amazon';
+            await videoProcessor.saveTranscription(timestamps, serviceName);
+            
+        } catch (error) {
+            console.error(`Error with ${service} transcription:`, error);
+            console.log(`Skipping ${service} transcription and continuing with others...`);
+        }
+    }
+    
+    // Если ни один сервис транскрипции не удался, завершаем работу
+    if (Object.keys(transcriptions).length === 0) {
+        throw new Error('All transcription services failed. Cannot continue.');
+    }
+    
+    // Сохраняем все транскрипции в один файл для сравнения
+    try {
+        const allTranscriptions: {
+            timestamp: string;
+            videoName: string;
+            services: string[];
+            transcriptions: Record<string, any>;
+        } = {
+            timestamp: new Date().toISOString(),
+            videoName: path.basename(videoPath, path.extname(videoPath)),
+            services: Object.keys(transcriptions).map(service => 
+                service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : 'amazon'
+            ),
+            transcriptions: {}
+        };
+        
+        for (const [service, timestamps] of Object.entries(transcriptions)) {
+            const serviceName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : 'amazon';
+            allTranscriptions.transcriptions[serviceName] = timestamps;
+        }
+        
+        const allTranscriptionsPath = path.join(videoProcessor.getOutputDirectory(), 'all_transcriptions.json');
+        console.log('\n📄 Creating combined transcriptions file with all services...');
+        await fs.promises.writeFile(allTranscriptionsPath, JSON.stringify(allTranscriptions, null, 2), 'utf-8');
+        console.log(`✅ All transcriptions saved to ${allTranscriptionsPath}`);
+        console.log(`   File contains data from ${Object.keys(transcriptions).length} transcription services.`);
+    } catch (error) {
+        console.error('❌ Error saving combined transcriptions:', error);
+    }
+    
+    // Step 4: For each transcription, run all AI analysis
+    const includeImages = videoProcessor.getIncludeImages();
+    
+    for (const [service, timestamps] of Object.entries(transcriptions)) {
+        const serviceShortName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : 'amazon';
+        console.log(`\n===== Processing transcription from ${serviceShortName} =====`);
+        
+        // OpenAI Analysis
+        console.log('Analyzing with OpenAI...');
+        try {
+            const openaiAnalysis = await aiService.analyzeWithOpenAI(timestamps, frames, includeImages);
+            await videoProcessor.saveAnalysis(openaiAnalysis, `openai_transcribed_by_${serviceShortName}`);
+        } catch (error) {
+            console.error(`Error with OpenAI analysis (${serviceShortName} transcription):`, error);
+        }
+        
+        // Anthropic Analysis
+        console.log('Analyzing with Anthropic Claude...');
+        try {
+            const anthropicAnalysis = await aiService.analyzeWithAnthropic(timestamps, frames, includeImages);
+            await videoProcessor.saveAnalysis(anthropicAnalysis, `anthropic_transcribed_by_${serviceShortName}`);
+        } catch (error) {
+            console.error(`Error with Anthropic analysis (${serviceShortName} transcription):`, error);
+        }
+        
+        // Gemini Analysis
+        console.log('Analyzing with Google Gemini...');
+        try {
+            const geminiAnalysis = await aiService.analyzeWithGemini(timestamps, frames, includeImages);
+            await videoProcessor.saveAnalysis(geminiAnalysis, `gemini_transcribed_by_${serviceShortName}`);
+        } catch (error) {
+            console.error(`Error with Gemini analysis (${serviceShortName} transcription):`, error);
+        }
+    }
+    
+    console.log('\nProcessing completed successfully!');
+    console.log(`All files are saved in: ${videoProcessor.getOutputDirectory()}`);
+    
+    // Сводка результатов
+    console.log('\n===== Results Summary =====');
+    console.log(`Total transcription services used: ${Object.keys(transcriptions).length}`);
+    for (const service of Object.keys(transcriptions)) {
+        const serviceShortName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : 'amazon';
+        console.log(`\nTranscription by ${serviceShortName}:`);
+        console.log(`- OpenAI analysis: analysis_openai_transcribed_by_${serviceShortName}${includeImages ? '_with_images' : ''}.json`);
+        console.log(`- Anthropic analysis: analysis_anthropic_transcribed_by_${serviceShortName}${includeImages ? '_with_images' : ''}.json`);
+        console.log(`- Gemini analysis: analysis_gemini_transcribed_by_${serviceShortName}${includeImages ? '_with_images' : ''}.json`);
+    }
+}
+
+// Run the application
 main().catch(console.error); 

@@ -3,7 +3,7 @@
 This application processes video files by:
 1. Extracting audio
 2. Capturing frames at 1 FPS (one frame per second) with preserved aspect ratio
-3. Transcribing audio using OpenAI Whisper
+3. Transcribing audio using BOTH OpenAI Whisper AND Amazon Transcribe
 4. Analyzing content using multiple AI models:
    - OpenAI GPT-4 with Vision
    - Anthropic Claude 3
@@ -17,6 +17,7 @@ This application processes video files by:
   - OpenAI (with GPT-4 access)
   - Anthropic
   - Google AI
+  - Amazon Web Services (required by default)
 
 ## FFmpeg Installation
 
@@ -65,9 +66,16 @@ npm install
 ```
 3. Create `.env` file with your API keys:
 ```bash
+# Required for all modes
 OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
 GOOGLE_API_KEY=your_google_key_here
+
+# Required by default (since the app uses Amazon Transcribe by default)
+AWS_ACCESS_KEY_ID=your_aws_access_key_here
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key_here
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=your_s3_bucket_name
 ```
 4. Build the application:
 ```bash
@@ -99,25 +107,45 @@ npm run dev /path/to/your/video.mp4
 
 # Run with debugger enabled
 npm run dev:debug /path/to/your/video.mp4
-```
 
-You can also use the no-images flag in development mode:
-```bash
+# Run with no images
 npm run dev /path/to/your/video.mp4 no-images
 ```
 
 The application will create an `output` directory containing:
 - Extracted audio file
 - Frame images (if not using no-images)
-- Analysis results from each AI model in separate files:
-  - With images: 
-    - `<video_name>_openai_with_images.json`
-    - `<video_name>_anthropic_with_images.json`
-    - `<video_name>_gemini_with_images.json`
-  - Without images:
-    - `<video_name>_openai.json`
-    - `<video_name>_anthropic.json`
-    - `<video_name>_gemini.json`
+- Transcriptions in JSON format (one per transcription service, plus a combined file)
+- Analysis results from each AI model in separate files
+
+### Matrix Mode Results
+
+The application always creates a matrix of results by:
+1. Transcribing the audio with both OpenAI Whisper and Amazon Transcribe
+2. Processing each transcription with all three AI models
+3. Saving a combined file with all transcriptions for comparison
+
+This results in the following output files:
+```
+output/
+└── video_name/
+    ├── audio.mp3                                        # Extracted audio
+    ├── transcription_openai.json                        # OpenAI Whisper transcription
+    ├── transcription_amazon.json                        # Amazon Transcribe transcription
+    ├── all_transcriptions.json                          # Combined transcriptions file
+    ├── frames/                                          # Frames directory (if images enabled)
+    │   ├── frame-0.jpg                                  # Frame at 0 seconds
+    │   ├── frame-1.jpg                                  # Frame at 1 second
+    │   └── ...
+    ├── analysis_openai_transcribed_by_openai.json       # OpenAI analysis of OpenAI transcription
+    ├── analysis_anthropic_transcribed_by_openai.json    # Anthropic analysis of OpenAI transcription
+    ├── analysis_gemini_transcribed_by_openai.json       # Gemini analysis of OpenAI transcription
+    ├── analysis_openai_transcribed_by_amazon.json       # OpenAI analysis of Amazon transcription
+    ├── analysis_anthropic_transcribed_by_amazon.json    # Anthropic analysis of Amazon transcription
+    └── analysis_gemini_transcribed_by_amazon.json       # Gemini analysis of Amazon transcription
+```
+
+With images enabled, the filenames will include `_with_images` suffix.
 
 ### Models Used
 
@@ -131,6 +159,34 @@ When processing without images:
 - Anthropic: Claude 3 Opus
 - Google: Gemini Pro
 
+### Transcription Services
+
+The application supports two transcription services:
+
+1. **OpenAI Whisper**
+   - Fast, accurate transcription
+   - Supports multiple languages
+   - No additional setup required beyond OpenAI API key
+   - Saved as `transcription_openai.json`
+
+2. **Amazon Transcribe**
+   - Higher accuracy for specific languages
+   - Better handling of domain-specific terminology
+   - Requires AWS credentials and S3 bucket
+   - May take longer due to AWS job processing
+   - Saved as `transcription_amazon.json`
+
+By default, BOTH services are used to create a comprehensive comparison, with all transcriptions also stored in a unified `all_transcriptions.json` file that contains:
+- Timestamp of processing
+- Video name
+- List of transcription services used
+- Complete transcription data from each service
+
+Each transcription file contains segments with:
+- `start`: Start time in seconds
+- `end`: End time in seconds
+- `text`: Transcribed text for that segment
+
 ## Development
 
 The project includes several npm scripts:
@@ -142,34 +198,32 @@ The project includes several npm scripts:
 
 When using `dev` or `dev:debug`, the application will automatically restart when you make changes to the source code.
 
-## Note
-
-Make sure you have FFmpeg installed on your system. You can download it from:
-- Windows: https://ffmpeg.org/download.html
-- Mac: `brew install ffmpeg`
-- Linux: `sudo apt-get install ffmpeg`
-
 ## Output Structure
 
-The application creates a separate directory for each processed video in the `output` folder:
+The application creates a separate directory for each processed video in the `output` folder.
+
+All processed videos will produce the following files:
 
 ```
 output/
 └── video_name/
-    ├── audio.mp3              # Extracted audio
-    ├── transcription.json     # Whisper transcription
-    ├── frames/               # Extracted video frames (1 frame per second)
-    │   ├── frame-0.jpg      # Frame at 0 seconds
-    │   ├── frame-1.jpg      # Frame at 1 second
-    │   ├── frame-2.jpg      # Frame at 2 seconds
+    ├── audio.mp3                                        # Extracted audio
+    ├── transcription_openai.json                        # OpenAI Whisper transcription
+    ├── transcription_amazon.json                        # Amazon Transcribe transcription
+    ├── all_transcriptions.json                          # Combined transcriptions file
+    ├── frames/                                          # Frames directory (if images enabled)
+    │   ├── frame-0.jpg                                  # Frame at 0 seconds
+    │   ├── frame-1.jpg                                  # Frame at 1 second
     │   └── ...
-    ├── analysis_openai.json        # OpenAI analysis without images
-    ├── analysis_openai_with_images.json  # OpenAI analysis with images
-    ├── analysis_anthropic.json     # Anthropic analysis without images
-    ├── analysis_anthropic_with_images.json  # Anthropic analysis with images
-    ├── analysis_gemini.json        # Gemini analysis without images
-    └── analysis_gemini_with_images.json  # Gemini analysis with images
+    ├── analysis_openai_transcribed_by_openai.json       # OpenAI analysis of OpenAI transcription
+    ├── analysis_anthropic_transcribed_by_openai.json    # Anthropic analysis of OpenAI transcription
+    ├── analysis_gemini_transcribed_by_openai.json       # Gemini analysis of OpenAI transcription
+    ├── analysis_openai_transcribed_by_amazon.json       # OpenAI analysis of Amazon transcription
+    ├── analysis_anthropic_transcribed_by_amazon.json    # Anthropic analysis of Amazon transcription
+    └── analysis_gemini_transcribed_by_amazon.json       # Gemini analysis of Amazon transcription
 ```
+
+With images enabled, the filenames will include `_with_images` suffix.
 
 Each analysis file contains a lesson in JSON format with:
 - Lesson title and description
