@@ -2,6 +2,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Timestamp, removeExistingDirectory } from './utils';
+import { TranscriptionServiceType } from './transcription';
 
 export interface ProcessOptions {
     videoPath: string;
@@ -46,6 +47,23 @@ export class VideoProcessor {
             } catch (error: any) {
                 throw new Error(`Failed to create output directory: ${error.message}`);
             }
+        }
+        
+        // Copy the original video file to the output directory
+        this.copyOriginalVideo();
+    }
+
+    private copyOriginalVideo(): void {
+        try {
+            const videoFileName = path.basename(this.videoPath);
+            const outputVideoPath = path.join(this.videoOutputDir, videoFileName);
+            
+            console.log(`Copying original video to output directory: ${outputVideoPath}`);
+            fs.copyFileSync(this.videoPath, outputVideoPath);
+            console.log('Original video copied successfully');
+        } catch (error: any) {
+            console.warn(`Failed to copy original video: ${error.message}`);
+            // Don't throw, just warn - we want to continue processing even if copy fails
         }
     }
 
@@ -153,5 +171,25 @@ export class VideoProcessor {
 
     public getVideoPath(): string {
         return this.videoPath;
+    }
+
+    // Add a new method to save raw transcription text
+    async saveRawTranscriptionText(timestamps: Timestamp[], serviceName: string): Promise<void> {
+        try {
+            // Convert timestamps array to a single string of text
+            const rawText = timestamps
+                .map(segment => segment.text)
+                .join('\n\n');
+            
+            
+            const rawTextFilename = `transcription_${serviceName}_raw.txt`;
+            const outputPath = path.join(this.videoOutputDir, rawTextFilename);
+            
+            // Write the raw text to file
+            await fs.promises.writeFile(outputPath, rawText, 'utf-8');
+            console.log(`✅ Raw transcription text saved to ${rawTextFilename}`);
+        } catch (error) {
+            console.error('❌ Error saving raw transcription text:', error);
+        }
     }
 } 
