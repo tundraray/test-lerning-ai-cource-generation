@@ -248,8 +248,8 @@ The application uses four transcription services:
    - Saved as `transcription_assemblyai.json` and `transcription_assemblyai_raw.txt`
 
 4. **Google Gemini**
-   - Direct audio transcription using Gemini 1.5 Flash model
-   - Processes native audio files with advanced AI recognition
+   - Complete multimedia transcription using Gemini 1.5 Flash model
+   - Processes both video and audio content for better context
    - Provides accurate timestamps and high-quality transcription
    - Uses the same Google API key as analysis
    - Saved as `transcription_gemini.json` and `transcription_gemini_raw.txt`

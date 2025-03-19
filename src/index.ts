@@ -77,8 +77,6 @@ async function main() {
 
     // Всегда используем все доступные сервисы транскрипции
     const transcriptionServices = [
-        TranscriptionServiceType.OPENAI_WHISPER,
-        TranscriptionServiceType.AMAZON_TRANSCRIBE,
         TranscriptionServiceType.GEMINI
     ];
 
