@@ -15,20 +15,20 @@ interface ProcessingOptions {
 
 function parseCommandLineArgs(): ProcessingOptions {
     const args = process.argv.slice(2);
-    
+
     // Parse options from command line
-    const options: { [key: string]: boolean  } = {
+    const options: { [key: string]: boolean } = {
         onlyTranscribe: true,
         images: false
     };
     args.forEach(arg => {
-         if (arg === 'no-images') {
+        if (arg === 'no-images') {
             options.images = false;
         } else if (arg === 'only-transcribe') {
             options.onlyTranscribe = true;
         }
     });
-    
+
     return {// No longer needed, will get from video folder
         includeImages: options.images,
         onlyTranscribe: !!options.onlyTranscribe
@@ -38,29 +38,29 @@ function parseCommandLineArgs(): ProcessingOptions {
 // New function to get all video files from the video folder
 function getVideoFiles(): string[] {
     const videoFolderPath = path.join(process.cwd(), 'video');
-    
+
     // Ensure video folder exists
     if (!fs.existsSync(videoFolderPath)) {
         console.error('\x1b[31m%s\x1b[0m', `Error: Video folder not found: ${videoFolderPath}`);
         console.log('Please create a "video" folder in the project root and add your video files there.');
         process.exit(1);
     }
-    
+
     // Get all files in the video folder
     const files = fs.readdirSync(videoFolderPath);
-    
+
     // Filter for supported video formats
     const videoFiles = files.filter(file => {
         const fileExtension = path.extname(file).toLowerCase();
         return SUPPORTED_VIDEO_FORMATS.includes(fileExtension);
     }).map(file => path.join(videoFolderPath, file));
-    
+
     if (videoFiles.length === 0) {
         console.error('\x1b[31m%s\x1b[0m', 'No supported video files found in the video folder');
         console.log('Supported formats:', SUPPORTED_VIDEO_FORMATS.join(', '));
         process.exit(1);
     }
-    
+
     return videoFiles;
 }
 
@@ -77,6 +77,7 @@ async function main() {
 
     // Всегда используем все доступные сервисы транскрипции
     const transcriptionServices = [
+        TranscriptionServiceType.OPENAI_WHISPER,
         TranscriptionServiceType.GEMINI
     ];
 
@@ -119,24 +120,24 @@ async function main() {
         console.log('AWS_REGION=us-east-1 (optional)');
         console.log('AWS_S3_BUCKET=your_bucket_name (optional)');
         console.log('ASSEMBLYAI_API_KEY=your_assemblyai_key_here');
-        
+
         process.exit(1);
     }
 
     // Get all video files from the video folder
     const videoFiles = getVideoFiles();
     console.log(`Found ${videoFiles.length} video files to process in the ./video folder`);
-    
+
     // Process each video file
     for (let i = 0; i < videoFiles.length; i++) {
         const videoPath = videoFiles[i];
         console.log(`\n===== Processing video ${i + 1} of ${videoFiles.length}: ${path.basename(videoPath)} =====`);
-        
+
         // Check if video file size is within limits
         try {
             const stats = await fs.promises.stat(videoPath);
             const fileSizeInMB = stats.size / (1024 * 1024);
-            
+
             if (fileSizeInMB > MAX_VIDEO_SIZE_MB) {
                 console.warn('\x1b[33m%s\x1b[0m', `Warning: Video file is large (${Math.round(fileSizeInMB)}MB). Maximum recommended size is ${MAX_VIDEO_SIZE_MB}MB`);
                 console.log('Processing anyway, but this might take longer...');
@@ -152,10 +153,10 @@ async function main() {
             const processorOptions: ProcessOptions = { videoPath, includeImages };
             const videoProcessor = new VideoProcessor(processorOptions);
             const aiService = new AIService();
-            
+
             // Process the video with all transcription services
             await processMatrix(videoProcessor, aiService, transcriptionServices, onlyTranscribe);
-            
+
             console.log(`\n✅ Completed processing ${path.basename(videoPath)}`);
         } catch (error) {
             console.error('\x1b[31m%s\x1b[0m', `Error during processing ${path.basename(videoPath)}:`);
@@ -171,13 +172,13 @@ async function main() {
             console.log('Continuing with next video...');
         }
     }
-    
+
     console.log('\n===== All videos have been processed =====');
 }
 
 // Новая функция для генерации матрицы результатов
 async function processMatrix(
-    videoProcessor: VideoProcessor, 
+    videoProcessor: VideoProcessor,
     aiService: AIService,
     transcriptionServices: TranscriptionServiceType[],
     onlyTranscribe: boolean = false,
@@ -193,48 +194,48 @@ async function processMatrix(
     console.log('Extracting audio...');
     const audioPath = await videoProcessor.extractAudio();
 
-    if(includeImages){
+    if (includeImages) {
         return;
     }
     // Step 2: Extract frames if needed
     console.log('Extracting frames...');
     const frames = await videoProcessor.extractFrames();
-    
+
     // Prepare to store all transcriptions
     const transcriptions: { [service: string]: any } = {};
-    
+
     // Step 3: Create transcriptions with each service
     for (const service of transcriptionServices) {
         console.log(`\n===== Transcribing with ${service} =====`);
         try {
             const timestamps = await TranscriptionManager.transcribe(audioPath, service);
             transcriptions[service] = timestamps;
-            
+
             // Save structured JSON transcription
             await videoProcessor.saveTranscription(timestamps, service);
-            
+
             // Save raw text version of the transcription
             await videoProcessor.saveRawTranscriptionText(timestamps, service);
-            
+
         } catch (error) {
             console.error(`Error with ${service} transcription:`, error);
             console.log(`Skipping ${service} transcription and continuing with others...`);
         }
     }
-    
+
     // Если ни один сервис транскрипции не удался, завершаем работу
     if (Object.keys(transcriptions).length === 0) {
         throw new Error('All transcription services failed. Cannot continue.');
     }
-    
+
     // Step 4: For each transcription, run all AI analysis (skip if onlyTranscribe is true)
     if (!onlyTranscribe) {
         const includeImages = videoProcessor.getIncludeImages();
-        
+
         for (const [service, timestamps] of Object.entries(transcriptions)) {
             const serviceShortName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : service === TranscriptionServiceType.AMAZON_TRANSCRIBE ? 'amazon' : 'assemblyai';
             console.log(`\n===== Processing transcription from ${serviceShortName} =====`);
-            
+
             // OpenAI Analysis
             console.log('Analyzing with OpenAI...');
             try {
@@ -243,7 +244,7 @@ async function processMatrix(
             } catch (error) {
                 console.error(`Error with OpenAI analysis (${serviceShortName} transcription):`, error);
             }
-            
+
             // Anthropic Analysis
             console.log('Analyzing with Anthropic Claude...');
             try {
@@ -252,7 +253,7 @@ async function processMatrix(
             } catch (error) {
                 console.error(`Error with Anthropic analysis (${serviceShortName} transcription):`, error);
             }
-            
+
             // Gemini Analysis
             console.log('Analyzing with Google Gemini...');
             try {
@@ -265,17 +266,17 @@ async function processMatrix(
     } else {
         console.log('\nSkipping AI analysis (running in transcription-only mode)');
     }
-    
+
     console.log('\nProcessing completed successfully!');
     console.log(`All files are saved in: ${videoProcessor.getOutputDirectory()}`);
-    
+
     // Сводка результатов
     console.log('\n===== Results Summary =====');
     console.log(`Total transcription services used: ${Object.keys(transcriptions).length}`);
-    
+
     // Получаем значение includeImages снова, так как оно может быть не видно в этом блоке
     const includeImagesInSummary = videoProcessor.getIncludeImages();
-    
+
     if (!onlyTranscribe) {
         for (const service of Object.keys(transcriptions)) {
             const serviceShortName = service === TranscriptionServiceType.OPENAI_WHISPER ? 'openai' : service === TranscriptionServiceType.AMAZON_TRANSCRIBE ? 'amazon' : 'assemblyai';

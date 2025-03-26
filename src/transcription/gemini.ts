@@ -30,15 +30,15 @@ export class GeminiTranscriptionService implements TranscriptionService {
 
     private async transcribeWithGemini(filePath: string, isAudio: boolean): Promise<Timestamp[]> {
         console.log(`Using Google Gemini for transcription with ${isAudio ? 'audio' : 'video'} file...`);
-        
+
         // Initialize Google AI
         const apiKey = process.env.GOOGLE_API_KEY;
         if (!apiKey) {
             throw new Error('GOOGLE_API_KEY environment variable is not set');
         }
-        
+
         const genAI = new GoogleGenerativeAI(apiKey);
-        
+
         // Use gemini-2.0-flash which supports audio files
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
@@ -47,18 +47,18 @@ export class GeminiTranscriptionService implements TranscriptionService {
         const randomId = crypto.randomBytes(16).toString('hex');
         const fileExt = path.extname(filePath);
         const tempFilePath = path.join(tempDir, `media-${randomId}${fileExt}`);
-        
+
         try {
             // Get media duration with ffmpeg
             const duration = await this.getMediaDuration(filePath);
-            
+
             // Copy the file to a temporary location
             console.log(`Copying ${isAudio ? 'audio' : 'video'} file to temporary location: ${tempFilePath}`);
             await fs.promises.copyFile(filePath, tempFilePath);
-            
+
             // Read the temporary file and convert to base64
             const fileData = await fs.promises.readFile(tempFilePath);
-            
+
             // Determine the correct MIME type
             let mimeType = isAudio ? 'audio/mpeg' : 'video/mp4';
             if (!isAudio) {
@@ -72,13 +72,13 @@ export class GeminiTranscriptionService implements TranscriptionService {
                     default: mimeType = 'video/mp4';
                 }
             }
-            
+
             // Create FileData for Gemini API
             const mediaData = {
                 data: fileData.toString('base64'),
                 mimeType: mimeType
             };
-            
+
             // Create prompt for transcription
             const prompt = `
             Please transcribe this video file with precise timestamps.
@@ -100,38 +100,38 @@ export class GeminiTranscriptionService implements TranscriptionService {
             ]
             
             Make sure to include:
-            1. Start time in seconds for each segment
-            2. End time in seconds for each segment
-            3. Transcribed text for each segment
+            1. Start time in seconds for each word
+            2. End time in seconds for each word
+            3. Transcribed text for each word
             
-            Divide the text into logical segments (like sentences or phrases).
+            Divide the text into logical words.
             `;
-            
+
             // Create multimodal content parts
             const parts: Part[] = [
                 { text: prompt },
                 { inlineData: mediaData }
             ];
-            
+
             console.log(`Sending ${isAudio ? 'audio' : 'video'} file to Gemini...`);
             const result = await model.generateContent({ contents: [{ role: 'user', parts }] });
             const response = await result.response;
             const text = response.text();
-            
+
             // Try to extract JSON array from response
             let jsonMatch = text.match(/\[[\s\S]*\]/);
             if (!jsonMatch) {
                 // If JSON extraction fails, create timestamps manually
                 console.warn('Could not extract valid JSON from Gemini response, creating timestamps manually');
-                
+
                 // Generate basic text for transcription
                 const segmentLength = 10; // Segment length in seconds
                 const segments: Timestamp[] = [];
                 let plainText = text.replace(/```json[\s\S]*?```|```[\s\S]*?```/g, '').trim(); // Remove code blocks
-                
+
                 // Split text into paragraphs
                 const paragraphs = plainText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-                
+
                 // Create segments with timestamps
                 let currentTime = 0;
                 for (const paragraph of paragraphs) {
@@ -143,22 +143,22 @@ export class GeminiTranscriptionService implements TranscriptionService {
                     });
                     currentTime = endTime;
                 }
-                
+
                 console.log(`Created ${segments.length} segments manually`);
                 return segments;
             }
-            
+
             try {
                 const timestamps = JSON.parse(jsonMatch[0]);
-                
+
                 // Validate the format
-                if (!Array.isArray(timestamps) || !timestamps.every(item => 
-                    typeof item.start === 'number' && 
-                    typeof item.end === 'number' && 
+                if (!Array.isArray(timestamps) || !timestamps.every(item =>
+                    typeof item.start === 'number' &&
+                    typeof item.end === 'number' &&
                     typeof item.text === 'string')) {
                     throw new Error('Invalid timestamp format in Gemini response');
                 }
-                
+
                 console.log(`Successfully transcribed ${isAudio ? 'audio' : 'video'} with Gemini (${timestamps.length} segments)`);
                 return timestamps;
             } catch (parseError) {
@@ -180,7 +180,7 @@ export class GeminiTranscriptionService implements TranscriptionService {
             }
         }
     }
-    
+
     /**
      * Gets the duration of the media file in seconds
      */
@@ -191,7 +191,7 @@ export class GeminiTranscriptionService implements TranscriptionService {
                     reject(err);
                     return;
                 }
-                
+
                 if (metadata && metadata.format && metadata.format.duration) {
                     resolve(Math.round(metadata.format.duration));
                 } else {
